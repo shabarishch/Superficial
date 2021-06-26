@@ -130,6 +130,37 @@ object PLArc {
         )
   }.to(ParSet)
 
+  def refinedFreeEnumLenOnePath(
+      arc: NormalArc[SkewPantsHexagon],
+      initDispLowerBound: Double,
+      initDispUpperBound: Double,
+      finalDispLowerBound: Double,
+      finalDispUpperBound: Double,
+      sep: Double
+  ): ParSet[PLPath] = {
+    require(
+      !(arc.terminalEdge.isInstanceOf[BoundaryEdge] || arc.initialEdge
+        .isInstanceOf[BoundaryEdge])
+    )
+    val initsep = math.max(
+      sep,
+      ((initDispUpperBound - initDispLowerBound) / 5)
+    )
+    val finalsep = math.max(
+      sep,
+      ((finalDispUpperBound - finalDispLowerBound) / 5)
+    )
+    for {
+      d1: Double <- rng(initDispLowerBound)(initDispUpperBound)(initsep)
+      d2: Double <- rng(finalDispLowerBound)(finalDispUpperBound)(finalsep)
+    } yield
+      PLPath(
+        NormalPath[SkewPantsHexagon](Vector(arc)),
+        Vector(d1),
+        Vector(d2)
+      )
+  }.to(ParSet)
+
   def fixedInitialEnumerate(
       arc: NormalArc[SkewPantsHexagon],
       initialDisplacement: Double,
@@ -141,6 +172,26 @@ object PLArc {
     )
     for (d2: Double <- rng(0)(arc.face.sideLength(arc.terminalEdge))(sep))
       yield PLArc(arc, initialDisplacement, d2)
+  }.to(ParSet)
+
+  def refinedFixedInitialEnumerate(
+      arc: NormalArc[SkewPantsHexagon],
+      initialDisplacement: Double,
+      finalDispLowerBound: Double,
+      finalDispUpperBound: Double,
+      sep: Double
+  ): ParSet[PLArc] = {
+    require(
+      !(arc.terminalEdge.isInstanceOf[BoundaryEdge] || arc.initialEdge
+        .isInstanceOf[BoundaryEdge])
+    )
+    val finalsep = math.max(
+      sep,
+      ((finalDispUpperBound - finalDispLowerBound) / 5)
+    )
+    for {
+      d2: Double <- rng(finalDispLowerBound)(finalDispUpperBound)(finalsep)
+    } yield PLArc(arc, initialDisplacement, d2)
   }.to(ParSet)
 }
 
@@ -279,6 +330,57 @@ object PLPath {
     }.to(ParSet)
   }
 
+  def appendPLArcClosed(
+      accum: ParSet[PLPath],
+      baseEdges: Vector[NormalArc[SkewPantsHexagon]],
+      numdone: Index,
+      finalDisplacementLowerBounds: Vector[Double],
+      finalDisplacementUpperBounds: Vector[Double],
+      globalsep: Double
+  ): ParSet[PLPath] = {
+    if (numdone == baseEdges.size) accum
+    else if (numdone == (baseEdges.size - 1)) {
+      for {
+        path <- accum
+      } yield
+        PLPath(
+          path.base.:+(baseEdges(numdone)),
+          path.initialDisplacements :+ findInitDisplacement(
+            baseEdges(numdone - 1),
+            path.finalDisplacements.last,
+            baseEdges(numdone)
+          ),
+          path.finalDisplacements :+ findFinalDisplacement(
+            baseEdges(numdone),
+            path.initialDisplacements.head,
+            baseEdges.head
+          )
+        )
+    } else {
+      val newsep = math.max(
+        globalsep,
+        ((finalDisplacementUpperBounds(numdone) - finalDisplacementLowerBounds(
+          numdone
+        )) / 5)
+      )
+      for {
+        path <- accum
+        d2: Double <- rng(finalDisplacementLowerBounds(numdone))(
+          finalDisplacementUpperBounds(numdone)
+        )(newsep)
+      } yield
+        PLPath(
+          path.base.:+(baseEdges(numdone)),
+          path.initialDisplacements :+ findInitDisplacement(
+            baseEdges(numdone - 1),
+            path.finalDisplacements.last,
+            baseEdges(numdone)
+          ),
+          path.finalDisplacements :+ d2
+        )
+    }.to(ParSet)
+  }
+
   /**
     * From a set of PLPaths with the same base, return a set of PLPaths that contains only the shortest path for each choice of start and end point
     * and only if the shortest path has length less than a specified bound
@@ -290,6 +392,15 @@ object PLPath {
   def pickMinimal(paths: ParSet[PLPath], bound: Double): ParSet[PLPath] = {
     paths
       .filter(path => (path.length <= bound))
+      .groupBy(p => (p.initialDisplacements.head, p.finalDisplacements.last))
+      .map {
+        case (_, s) => s.minBy(_.length)
+      }
+      .to(ParSet)
+  }
+
+  def pickMinimalWithoutBound(paths: ParSet[PLPath]): ParSet[PLPath] = {
+    paths
       .groupBy(p => (p.initialDisplacements.head, p.finalDisplacements.last))
       .map {
         case (_, s) => s.minBy(_.length)
@@ -385,6 +496,179 @@ object PLPath {
       .flatten
       .seq
       .minByOption(_.length)
+  }
+
+  def firstEnumMinimalClosed(
+      base: NormalPath[SkewPantsHexagon],
+      globalsep: Double
+  ): PLPath = {
+    require(base.isClosed, s"$base is not closed")
+    val terminaledgeLengths = base.edges.zip(base.edges.map(_.face)).map {
+      case (e, f) => f.sideLength(e.terminalEdge)
+    }
+    refinedEnumMinimalClosed(
+      PLArc.refinedFreeEnumLenOnePath(
+        base.edges.head,
+        0,
+        base.edges.head.face.sideLength(base.edges.head.initialEdge),
+        0,
+        terminaledgeLengths(0),
+        globalsep
+      ),
+      base.edges,
+      1,
+      globalsep,
+      Vector.fill(terminaledgeLengths.size)(0),
+      terminaledgeLengths
+    ).minBy(_.length)
+  }
+
+  def refinedEnumMinimalClosed(
+      accum: ParSet[PLPath],
+      baseedges: Vector[NormalArc[SkewPantsHexagon]],
+      numdone: Index,
+      globalsep: Double,
+      finalDisplacementLowerBounds: Vector[Double],
+      finalDisplacementUpperBounds: Vector[Double]
+  ): ParSet[PLPath] = {
+    if (numdone == baseedges.size) accum
+    else
+      refinedEnumMinimalClosed(
+        pickMinimalWithoutBound(
+          appendPLArcClosed(
+            accum,
+            baseedges,
+            numdone,
+            finalDisplacementLowerBounds,
+            finalDisplacementUpperBounds,
+            globalsep
+          )
+        ),
+        baseedges,
+        numdone + 1,
+        globalsep,
+        finalDisplacementLowerBounds,
+        finalDisplacementUpperBounds
+      )
+  }
+
+  def targetedEnumMinimalClosed(
+      base: NormalPath[SkewPantsHexagon],
+      bound: Double,
+      globalsep: Double
+  ): Option[PLPath] = {
+    require(base.isClosed, s"$base is not closed")
+    val coarsePLPath = firstEnumMinimalClosed(base, globalsep)
+    val firstArcInitDispLowerBd = math.max(
+      0,
+      coarsePLPath.initialDisplacements.head - math.max(
+        globalsep,
+        coarsePLPath.base.edges.head.face
+          .sideLength(coarsePLPath.base.edges.head.initialEdge) / 5
+      )
+    )
+    val firstArcInitDispUpperBd = math.min(
+      coarsePLPath.base.edges.head.face
+        .sideLength(coarsePLPath.base.edges.head.initialEdge),
+      coarsePLPath.initialDisplacements.head + math.max(
+        globalsep,
+        coarsePLPath.base.edges.head.face
+          .sideLength(coarsePLPath.base.edges.head.initialEdge) / 5
+      )
+    )
+    val finalDispLowerBds = coarsePLPath.plArcs.map(
+      arc =>
+        math.max(
+          0,
+          arc.finalDisplacement - math
+            .max(globalsep, arc.base.face.sideLength(arc.base.terminalEdge) / 5)
+        )
+    )
+    val finalDispUpperBds = coarsePLPath.plArcs.map(
+      arc =>
+        math.min(
+          arc.base.face.sideLength(arc.base.terminalEdge),
+          arc.finalDisplacement + math
+            .max(globalsep, arc.base.face.sideLength(arc.base.terminalEdge) / 5)
+        )
+    )
+    val plpath = targetedEnumMinimalClosedRec(
+      coarsePLPath,
+      globalsep,
+      firstArcInitDispLowerBd,
+      firstArcInitDispUpperBd,
+      finalDispLowerBds,
+      finalDispUpperBds
+    )
+    if (plpath.length < bound) Some(plpath) else None
+  }
+
+  def targetedEnumMinimalClosedRec(
+      plbase: PLPath,
+      globalsep: Double,
+      firstArcInitDispLowerBd: Double,
+      firstArcInitDispUpperBd: Double,
+      finalDispLowerBds: Vector[Double],
+      finalDispUpperBds: Vector[Double]
+  ): PLPath = {
+    if (((firstArcInitDispUpperBd - firstArcInitDispLowerBd) > (2 * globalsep)) || finalDispUpperBds
+          .zip(finalDispLowerBds)
+          .map(p => p._1 - p._2)
+          .exists(_ > (2.1 * globalsep))) {
+      val newplbase = refinedEnumMinimalClosed(
+        PLArc.refinedFreeEnumLenOnePath(
+          plbase.base.edges.head,
+          firstArcInitDispLowerBd,
+          firstArcInitDispUpperBd,
+          finalDispLowerBds(0),
+          finalDispUpperBds(0),
+          globalsep
+        ),
+        plbase.base.edges,
+        1,
+        globalsep,
+        finalDispLowerBds,
+        finalDispUpperBds
+      ).minBy(_.length)
+      val newInitSep = math.max(
+        globalsep,
+        (firstArcInitDispUpperBd - firstArcInitDispLowerBd) / 5
+      )
+      val newFinalSeps = finalDispUpperBds
+        .zip(finalDispLowerBds)
+        .map(p => math.max(globalsep, (p._1 - p._2) / 5))
+      val newFirstArcInitDispLowerBd = math.max(
+        0,
+        newplbase.initialDisplacements.head - newInitSep
+      )
+      val newFirstArcInitDispUpperBd = math.min(
+        plbase.base.edges.head.face
+          .sideLength(plbase.base.edges.head.initialEdge),
+        plbase.initialDisplacements.head + newInitSep
+      )
+      val newFinalDispLowerBds = plbase.plArcs.zip(newFinalSeps).map {
+        case (arc, finalsep) =>
+          math.max(
+            0,
+            arc.finalDisplacement - finalsep
+          )
+      }
+      val newFinalDispUpperBds = plbase.plArcs.zip(newFinalSeps).map {
+        case (arc, finalsep) =>
+          math.min(
+            arc.base.face.sideLength(arc.base.terminalEdge),
+            arc.finalDisplacement + finalsep
+          )
+      }
+      targetedEnumMinimalClosedRec(
+        newplbase,
+        globalsep,
+        newFirstArcInitDispLowerBd,
+        newFirstArcInitDispUpperBd,
+        newFinalDispLowerBds,
+        newFinalDispUpperBds
+      )
+    } else plbase
   }
 
   /**
